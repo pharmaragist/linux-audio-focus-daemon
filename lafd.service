@@ -1,0 +1,16 @@
+[Unit]
+Description=Linux audio focus daemon (MPRIS)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/lafd
+Restart=always
+RestartSec=2s
+TimeoutStopSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=graphical-session.target
