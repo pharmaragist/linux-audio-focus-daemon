@@ -1,6 +1,7 @@
 //! `lafd` - Android-style audio focus daemon for MPRIS players.
 
 use lafd::config::Config;
+use lafd::device::DeviceMonitor;
 use lafd::focus::FocusManager;
 use lafd::mpris::Monitor;
 use lafd::protocol::{Request, Response};
@@ -82,21 +83,28 @@ fn main() {
 
     let mut manager = FocusManager::new(cfg.clone());
     manager.adopt(&monitor, Instant::now());
+    let mut devices = DeviceMonitor::new(cfg.device_poll_ms);
 
     eprintln!(
-        "lafd: started (socket={}, players={}, trigger_players={:?})",
+        "lafd: started (socket={}, players={}, trigger_players={:?}, device_poll_ms={})",
         cfg.socket_path,
         players.len(),
-        cfg.trigger_players
+        cfg.trigger_players,
+        cfg.device_poll_ms
     );
 
-    run(&mut manager, &mut monitor, &rx);
+    run(&mut manager, &mut monitor, &mut devices, &rx);
 
     fs::remove_file(&cfg.socket_path).ok();
     eprintln!("lafd: stopped");
 }
 
-fn run(manager: &mut FocusManager, monitor: &mut Monitor, rx: &Receiver<Job>) {
+fn run(
+    manager: &mut FocusManager,
+    monitor: &mut Monitor,
+    devices: &mut DeviceMonitor,
+    rx: &Receiver<Job>,
+) {
     loop {
         // Apply every pending command first, so the reply reflects it.
         loop {
@@ -111,6 +119,18 @@ fn run(manager: &mut FocusManager, monitor: &mut Monitor, rx: &Receiver<Job>) {
 
         let now = Instant::now();
         manager.tick(monitor, now);
+
+        // Snapshot playback right before each device poll, so a removal can
+        // tell which players were interrupted even if they paused themselves.
+        if devices.due(now) {
+            manager.observe(monitor, now);
+        }
+        if let Some(event) = devices.poll(now) {
+            if let Some(sink) = devices.sink() {
+                eprintln!("lafd: output device changed: {event:?} (default sink={sink})");
+            }
+            manager.on_device_event(event, monitor, now);
+        }
 
         let mut wait = POLL;
         if let Some(remaining) = manager.time_until_deadline(now) {

@@ -4,10 +4,15 @@
 //! applied in order by the daemon's main loop, so no locking is needed.
 
 use crate::config::Config;
+use crate::device;
 use crate::mpris::{matches_any, Event, Player, Source};
 use crate::protocol::{FocusInfo, PlayerStatus, Request, Response, Status};
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
+
+/// How long a player that just stopped counts as interrupted by a device
+/// removal. Covers the device poll interval plus the player's reaction time.
+const DEVICE_MEMORY: Duration = Duration::from_secs(5);
 
 /// Focus grant mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +48,13 @@ pub struct FocusManager {
     cfg: Config,
     focus: Option<Focus>,
     paused: BTreeSet<String>,
+    /// Players paused because the output device went away. They are resumed
+    /// when a device comes back, independently of the focus bookkeeping.
+    device_paused: BTreeSet<String>,
+    /// When each player was last seen playing. A device removal uses this
+    /// because a player often pauses itself before the daemon notices that
+    /// the sink is gone.
+    last_playing: HashMap<String, Instant>,
     grace: HashMap<String, Instant>,
     deadline: Option<Instant>,
 }
@@ -53,6 +65,8 @@ impl FocusManager {
             cfg,
             focus: None,
             paused: BTreeSet::new(),
+            device_paused: BTreeSet::new(),
+            last_playing: HashMap::new(),
             grace: HashMap::new(),
             deadline: None,
         }
@@ -118,6 +132,44 @@ impl FocusManager {
         }
     }
 
+    /// Remember which players are playing. Call once per main-loop iteration,
+    /// so a device removal can tell what was interrupted even if the player
+    /// paused itself before the next device poll.
+    pub fn observe(&mut self, src: &dyn Source, now: Instant) {
+        for player in src.players() {
+            if player.status == "Playing" {
+                self.last_playing.insert(player.name, now);
+            }
+        }
+        let memory = self.device_memory();
+        self.last_playing
+            .retain(|_, at| now.saturating_duration_since(*at) < memory);
+    }
+
+    /// How far back a player that stopped counts as interrupted by a device
+    /// removal. Two polls plus a margin, so a slow poll interval still works.
+    fn device_memory(&self) -> Duration {
+        DEVICE_MEMORY.max(Duration::from_millis(
+            self.cfg.device_poll_ms.saturating_mul(2),
+        ))
+    }
+
+    /// Apply an output device change.
+    ///
+    /// Removing the last output device pauses playback so audio does not jump
+    /// to another sink. Attaching a device resumes the players that were
+    /// paused this way, but only when nothing else is playing. A locked
+    /// trigger (call, alarm) always wins and ignores device changes.
+    pub fn on_device_event(&mut self, event: device::Event, src: &dyn Source, now: Instant) {
+        if self.focus.as_ref().is_some_and(|focus| focus.locked) {
+            return;
+        }
+        match event {
+            device::Event::Attached => self.resume_after_device(src, now),
+            device::Event::Detached => self.pause_for_device(src, now),
+        }
+    }
+
     /// Release an expired trigger lock. Call once per main-loop iteration.
     pub fn tick(&mut self, src: &dyn Source, now: Instant) {
         let Some(deadline) = self.deadline else {
@@ -159,7 +211,7 @@ impl FocusManager {
                     .focus
                     .as_ref()
                     .is_some_and(|focus| focus.owner == player.name),
-                paused_by_service: self.paused.contains(&player.name),
+                paused_by_service: self.paused_by_service(&player.name),
                 name: player.name,
                 identity: player.identity,
                 status: player.status,
@@ -168,7 +220,7 @@ impl FocusManager {
 
         Status {
             focus,
-            paused_by_service: self.paused.iter().cloned().collect(),
+            paused_by_service: self.paused.union(&self.device_paused).cloned().collect(),
             players,
         }
     }
@@ -252,6 +304,7 @@ impl FocusManager {
 
         // A player that starts again is no longer waiting to be resumed.
         self.paused.remove(&player.name);
+        self.device_paused.remove(&player.name);
 
         // Trigger players interrupt automatic focus but never a manual lock.
         if self.is_trigger(player) && !self.focus.as_ref().is_some_and(|focus| focus.locked) {
@@ -335,6 +388,7 @@ impl FocusManager {
 
     fn on_removed(&mut self, name: &str, src: &dyn Source, now: Instant) {
         self.paused.remove(name);
+        self.device_paused.remove(name);
         self.grace.remove(name);
 
         let auto_owner = self
@@ -425,6 +479,10 @@ impl FocusManager {
         }
     }
 
+    fn paused_by_service(&self, name: &str) -> bool {
+        self.paused.contains(name) || self.device_paused.contains(name)
+    }
+
     fn pause_others(&mut self, except: Option<&str>, src: &dyn Source) {
         let names: Vec<String> = src
             .players()
@@ -457,13 +515,80 @@ impl FocusManager {
         }
     }
 
-    fn resume_paused(&mut self, src: &dyn Source, now: Instant) {
-        if self.paused.is_empty() {
+    /// Pause everything that plays because the output device disappeared.
+    fn pause_for_device(&mut self, src: &dyn Source, now: Instant) {
+        let memory = self.device_memory();
+        let mut names: BTreeSet<String> = self
+            .last_playing
+            .iter()
+            .filter(|(_, at)| now.saturating_duration_since(**at) < memory)
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.extend(
+            src.players()
+                .into_iter()
+                .filter(|player| player.status == "Playing")
+                .map(|player| player.name),
+        );
+
+        for name in names {
+            let Some(player) = src.get(&name) else {
+                continue;
+            };
+            match player.status.as_str() {
+                "Playing" => {
+                    eprintln!(
+                        "lafd: output device removed, pausing {} ({})",
+                        player.identity, name
+                    );
+                    if src.pause(&name).is_ok() {
+                        self.device_paused.insert(name);
+                    } else {
+                        eprintln!("lafd: could not pause {name}");
+                    }
+                }
+                // The player noticed the missing sink first.
+                "Paused" => {
+                    eprintln!(
+                        "lafd: output device removed, {} ({}) is already paused",
+                        player.identity, name
+                    );
+                    self.device_paused.insert(name);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Resume players that were paused by a device removal.
+    fn resume_after_device(&mut self, src: &dyn Source, now: Instant) {
+        if self.device_paused.is_empty() {
             return;
         }
+        if src
+            .players()
+            .iter()
+            .any(|player| player.status == "Playing")
+        {
+            // Something is already playing on the new device. Do not
+            // interrupt it; the set waits for the next attach.
+            return;
+        }
+        let names: Vec<String> = self.device_paused.iter().cloned().collect();
+        self.device_paused.clear();
+        self.resume_names(names, "output device attached", src, now);
+    }
 
+    fn resume_paused(&mut self, src: &dyn Source, now: Instant) {
         let names: Vec<String> = self.paused.iter().cloned().collect();
         self.paused.clear();
+        self.resume_names(names, "resumed after focus loss", src, now);
+    }
+
+    fn resume_names(&mut self, names: Vec<String>, reason: &str, src: &dyn Source, now: Instant) {
+        if names.is_empty() {
+            return;
+        }
 
         let grace = Duration::from_millis(self.cfg.resume_grace_ms);
         let mut first: Option<String> = None;
@@ -487,7 +612,7 @@ impl FocusManager {
         }
 
         if let Some(owner) = first {
-            self.set_auto_focus(&owner, "resumed after focus loss", now);
+            self.set_auto_focus(&owner, reason, now);
         }
     }
 
@@ -796,6 +921,91 @@ mod tests {
             timeout_ms: None,
         };
         assert!(!mgr.handle(&second, &src, now).ok);
+    }
+
+    #[test]
+    fn device_removal_pauses_and_attach_resumes() {
+        let src = FakeSource::new(&[("alpha", "Alpha", "Playing")]);
+        let now = Instant::now();
+        let mut mgr = manager(&[]);
+        mgr.adopt(&src, now);
+
+        mgr.on_device_event(crate::device::Event::Detached, &src, now);
+        assert_eq!(src.status_of("alpha"), "Paused");
+        assert_eq!(src.pause_calls(), vec!["org.mpris.MediaPlayer2.alpha"]);
+
+        // The player reports the pause, which releases focus.
+        mgr.on_event(src.event("alpha"), &src, now);
+        assert!(mgr.status(&src, now).focus.is_none());
+        assert!(mgr.status(&src, now).players[0].paused_by_service);
+
+        let later = now + Duration::from_secs(1);
+        mgr.on_device_event(crate::device::Event::Attached, &src, later);
+        assert_eq!(src.status_of("alpha"), "Playing");
+        assert_eq!(
+            mgr.status(&src, later).focus.unwrap().reason,
+            "output device attached"
+        );
+    }
+
+    #[test]
+    fn device_removal_remembers_a_player_that_paused_itself() {
+        let src = FakeSource::new(&[("alpha", "Alpha", "Playing")]);
+        let now = Instant::now();
+        let mut mgr = manager(&[]);
+        mgr.adopt(&src, now);
+        mgr.observe(&src, now);
+
+        // The player stops on its own when its sink disappears.
+        src.set_status("alpha", "Paused");
+        mgr.on_event(src.event("alpha"), &src, now);
+        assert!(mgr.status(&src, now).focus.is_none());
+
+        let later = now + Duration::from_secs(1);
+        mgr.on_device_event(crate::device::Event::Detached, &src, later);
+        assert!(src.pause_calls().is_empty(), "player is already paused");
+
+        mgr.on_device_event(crate::device::Event::Attached, &src, later);
+        assert_eq!(src.status_of("alpha"), "Playing");
+    }
+
+    #[test]
+    fn device_attach_does_not_interrupt_current_playback() {
+        let src = FakeSource::new(&[("alpha", "Alpha", "Playing"), ("beta", "Beta", "Paused")]);
+        let now = Instant::now();
+        let mut mgr = manager(&[]);
+        mgr.adopt(&src, now);
+
+        mgr.on_device_event(crate::device::Event::Detached, &src, now);
+        mgr.on_event(src.event("alpha"), &src, now);
+
+        src.set_status("beta", "Playing");
+        mgr.on_event(src.event("beta"), &src, now);
+
+        mgr.on_device_event(crate::device::Event::Attached, &src, now);
+        assert_eq!(src.status_of("alpha"), "Paused");
+        assert_eq!(src.status_of("beta"), "Playing");
+        assert!(src.play_calls().is_empty());
+    }
+
+    #[test]
+    fn device_changes_are_ignored_while_a_trigger_is_locked() {
+        let src = FakeSource::new(&[("alpha", "Alpha", "Playing")]);
+        let now = Instant::now();
+        let mut mgr = manager(&[]);
+        mgr.adopt(&src, now);
+
+        let start = Request {
+            cmd: "trigger_start".to_string(),
+            name: Some("call".to_string()),
+            timeout_ms: None,
+        };
+        assert!(mgr.handle(&start, &src, now).ok);
+
+        mgr.on_device_event(crate::device::Event::Detached, &src, now);
+        mgr.on_device_event(crate::device::Event::Attached, &src, now);
+        assert_eq!(src.status_of("alpha"), "Paused");
+        assert!(src.play_calls().is_empty());
     }
 
     #[test]

@@ -22,6 +22,10 @@ runtime and no async executor.
 - **Manual trigger** — any non-MPRIS event can call
   `lafdctl trigger start --timeout 60s call` and `lafdctl trigger end call`.
   New players that start during a trigger are paused too.
+- **Output device removed** — playback is paused so audio does not jump to
+  the speakers when headphones are unplugged. When an output device is
+  attached again, the players paused this way are resumed, unless something
+  else is already playing. Trigger locks ignore device changes.
 - **Startup** — one already-playing player is adopted without pausing
   anything. If a trigger player is already playing, the trigger lock is
   acquired and everything else is paused.
@@ -113,7 +117,8 @@ Default config:
   "ignore": ["playerctld"],
   "trigger_players": ["ringtone", "alarm", "call", "phone"],
   "trigger_timeout_ms": 0,
-  "resume_grace_ms": 1500
+  "resume_grace_ms": 1500,
+  "device_poll_ms": 2000
 }
 ```
 
@@ -126,6 +131,8 @@ Default config:
   limit.
 - `resume_grace_ms` — protection window for players resumed together, so they
   do not immediately steal focus from each other.
+- `device_poll_ms` — how often the default output sink is checked for
+  headphone plug/unplug, in milliseconds. `0` disables device tracking.
 
 After editing the config:
 
@@ -182,6 +189,11 @@ anonymous memory with 7 threads.
 - Pause and play calls run on the main thread with a 1 s timeout. A failed
   pause is removed from the resume set and logged.
 - Track metadata is not read; only `Identity` and `PlaybackStatus` are used.
+- PipeWire has no stable D-Bus API for the default sink, so the daemon polls
+  `pactl get-default-sink` every `device_poll_ms`. It pauses when the current
+  default sink disappears and resumes when a default sink is selected again.
+  A 3.5 mm jack switch that keeps the same ALSA sink is not visible this way;
+  Bluetooth and USB devices are.
 - `playerctld` is ignored because it proxies other players.
 - A stale socket file left by a crash is detected and removed on startup.
 

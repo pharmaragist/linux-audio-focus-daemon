@@ -5,6 +5,7 @@
 //! and a trigger (call, alarm, ...) pauses everything until it ends.
 
 pub mod config;
+pub mod device;
 pub mod focus;
 pub mod mpris;
 pub mod protocol;

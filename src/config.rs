@@ -21,6 +21,9 @@ pub struct Config {
     /// Window in milliseconds during which a resumed player is protected from
     /// being paused again by another player's playback transition.
     pub resume_grace_ms: u64,
+    /// How often the default output sink is checked, in milliseconds. Zero
+    /// disables headphone detection.
+    pub device_poll_ms: u64,
 }
 
 impl Default for Config {
@@ -31,6 +34,7 @@ impl Default for Config {
             trigger_players: Vec::new(),
             trigger_timeout_ms: 0,
             resume_grace_ms: 1500,
+            device_poll_ms: 2000,
         }
     }
 }
@@ -91,6 +95,7 @@ mod tests {
         assert_eq!(cfg.ignore, vec!["playerctld".to_string()]);
         assert_eq!(cfg.resume_grace_ms, 1500);
         assert_eq!(cfg.trigger_timeout_ms, 0);
+        assert_eq!(cfg.device_poll_ms, 2000);
     }
 
     #[test]
@@ -112,7 +117,8 @@ mod tests {
                 "ignore": ["playerctld", "vlc"],
                 "trigger_players": ["alarm"],
                 "trigger_timeout_ms": 30000,
-                "resume_grace_ms": 250
+                "resume_grace_ms": 250,
+                "device_poll_ms": 500
             }"#,
         )
         .unwrap();
@@ -123,6 +129,7 @@ mod tests {
         assert_eq!(cfg.trigger_players, vec!["alarm"]);
         assert_eq!(cfg.trigger_timeout_ms, 30000);
         assert_eq!(cfg.resume_grace_ms, 250);
+        assert_eq!(cfg.device_poll_ms, 500);
         fs::remove_dir_all(&dir).ok();
     }
 
