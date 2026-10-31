@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
+set +u
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+set -u
+ROOT="$(cd "$(dirname "${SCRIPT_SOURCE:-.}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lafd"
@@ -29,7 +32,7 @@ if [[ ! -f "$ROOT/Cargo.toml" ]]; then
   fi
   echo "==> fetching sources to $SRC_DIR"
   rm -rf "$SRC_DIR"
-  if ! git clone --depth 1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1; then
+  if ! git clone --depth 1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1 </dev/null; then
     echo "install: could not clone $REPO_URL" >&2
     echo "         set LAFD_REPO to a fork or private remote and retry" >&2
     exit 1
