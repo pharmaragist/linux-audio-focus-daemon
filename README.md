@@ -32,13 +32,22 @@ trigger for those.
 
 ## Install
 
-One line:
+One line, no checkout needed:
 
 ```bash
-git clone git@github.com:pharmaragist/linux-audio-focus-daemon.git ~/Projects/linux-audio-focus-daemon && ~/Projects/linux-audio-focus-daemon/install.sh
+curl -fsSL https://raw.githubusercontent.com/pharmaragist/linux-audio-focus-daemon/main/install.sh | bash
 ```
 
-Or from an existing checkout:
+The script clones the source to `${XDG_CACHE_HOME:-~/.cache}/lafd/src`, builds
+it, and installs the service. Point it at a fork or private remote with
+`LAFD_REPO`, and at a different checkout location with `LAFD_SRC_DIR`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pharmaragist/linux-audio-focus-daemon/main/install.sh \
+  | LAFD_REPO=git@github.com:you/linux-audio-focus-daemon.git bash
+```
+
+From an existing checkout:
 
 ```bash
 cd ~/Projects/linux-audio-focus-daemon

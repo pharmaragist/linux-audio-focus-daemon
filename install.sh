@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lafd"
@@ -17,6 +17,24 @@ fi
 if [[ -z "$CARGO" ]]; then
   echo "install: cargo not found (install rustup or set CARGO=/path/to/cargo)" >&2
   exit 1
+fi
+
+# A piped install (`curl ... | bash`) has no source tree next to the script.
+REPO_URL="${LAFD_REPO:-https://github.com/pharmaragist/linux-audio-focus-daemon.git}"
+SRC_DIR="${LAFD_SRC_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lafd/src}"
+if [[ ! -f "$ROOT/Cargo.toml" ]]; then
+  if ! command -v git >/dev/null 2>&1; then
+    echo "install: git is required for a piped install" >&2
+    exit 1
+  fi
+  echo "==> fetching sources to $SRC_DIR"
+  rm -rf "$SRC_DIR"
+  if ! git clone --depth 1 "$REPO_URL" "$SRC_DIR" >/dev/null 2>&1; then
+    echo "install: could not clone $REPO_URL" >&2
+    echo "         set LAFD_REPO to a fork or private remote and retry" >&2
+    exit 1
+  fi
+  ROOT="$SRC_DIR"
 fi
 
 echo "==> building"
