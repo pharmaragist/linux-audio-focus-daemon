@@ -32,6 +32,14 @@ trigger for those.
 
 ## Install
 
+One line:
+
+```bash
+git clone git@github.com:pharmaragist/linux-audio-focus-daemon.git ~/Projects/linux-audio-focus-daemon && ~/Projects/linux-audio-focus-daemon/install.sh
+```
+
+Or from an existing checkout:
+
 ```bash
 cd ~/Projects/linux-audio-focus-daemon
 ./install.sh
